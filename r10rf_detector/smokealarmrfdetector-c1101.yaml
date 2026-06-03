@@ -1,3 +1,8 @@
+substitutions:
+  # Comma separated list of known alarm frame fragments.
+  # Add additional discovered codes here, for example: "5ba9ce8a,b12cd34e,cafe1234"
+  r10rf_known_codes: "5ba9ce8a,aaaa5ba9ce8a,aaaa5ba9c,aaa96ea7,5554b7538,5555a4563175"
+
 esphome:
   name: smokealarmrfdetector-c1101
   friendly_name: Smoke Alarm RF Detector
@@ -10,6 +15,7 @@ esphome:
     priority: 600
     then:
       - lambda: |-
+          r10rf_set_known_codes("${r10rf_known_codes}");
           r10rf_setup();
 
 esp32:
@@ -34,6 +40,10 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  # Optional fallback access point. Uncomment if desired.
+  # ap:
+  #   ssid: "Smoke Alarm RF Fallback"
+  #   password: !secret fallback_ap_password
 
 captive_portal:
 
@@ -55,13 +65,28 @@ sensor:
 text_sensor:
   - platform: template
     id: r10rf_last_frame
-    name: "R10RF Last Frame"
+    name: "R10RF Last Matched Frame"
+
+  - platform: template
+    id: r10rf_last_raw_frame
+    name: "R10RF Last Raw Frame"
+
+  - platform: template
+    id: r10rf_last_unknown_frame
+    name: "R10RF Last Unknown Frame"
 
 interval:
   - interval: 50ms
     then:
       - lambda: |-
           r10rf_loop();
+
+          id(r10rf_last_raw_frame).publish_state(r10rf_get_last_raw_frame());
+
+          if (r10rf_has_unknown_frame()) {
+            id(r10rf_last_unknown_frame).publish_state(r10rf_get_last_unknown_frame());
+            r10rf_clear_unknown_frame();
+          }
 
           if (r10rf_has_alarm()) {
             id(r10rf_alarm).publish_state(true);

@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
+#include <string.h>
 
 // =====================================================
 // Red R10RF CC1101 receive only detector
@@ -19,7 +20,10 @@
 //   433.92 MHz
 //   2 FSK
 //   9.6 kBaud
-//   alarm frame core: aaaa5ba9ce8a
+//   common observed alarm frame core: aaaa5ba9ce8a
+//
+// Known alarm frame fragments are supplied by ESPHome YAML:
+//   r10rf_set_known_codes("5ba9ce8a,aaaa5ba9ce8a,...");
 // =====================================================
 
 #define CC1101_IOCFG0 0x02
@@ -51,6 +55,10 @@ static constexpr uint32_t FRAME_GAP_US = 500;
 static constexpr uint8_t MAX_RUN_BITS = 32;
 static constexpr uint16_t MAX_FRAME_BITS = 512;
 
+static constexpr uint8_t MAX_KNOWN_CODES = 16;
+static constexpr uint8_t MAX_CODE_LEN = 32;
+static constexpr uint8_t FRAME_TEXT_LEN = 64;
+
 static volatile uint32_t edge_time[MAX_EDGES];
 static volatile uint8_t edge_level[MAX_EDGES];
 static volatile uint16_t edge_count = 0;
@@ -62,10 +70,59 @@ static volatile uint32_t capture_start_us = 0;
 static volatile uint32_t last_carrier_change_us = 0;
 
 static bool alarm_detected = false;
+static bool unknown_frame_seen = false;
+
 static int last_rssi = -120;
-static char last_frame[48] = "";
+static char last_frame[FRAME_TEXT_LEN] = "";
+static char last_raw_frame[FRAME_TEXT_LEN] = "";
+static char last_unknown_frame[FRAME_TEXT_LEN] = "";
+
+static char known_codes[MAX_KNOWN_CODES][MAX_CODE_LEN];
+static uint8_t known_code_count = 0;
 
 static uint32_t last_rx_reset_ms = 0;
+
+// =====================================================
+// User supplied code list
+// =====================================================
+
+void r10rf_set_known_codes(const char *csv) {
+  known_code_count = 0;
+
+  for (uint8_t i = 0; i < MAX_KNOWN_CODES; i++) {
+    known_codes[i][0] = '\0';
+  }
+
+  if (csv == nullptr || csv[0] == '\0') {
+    return;
+  }
+
+  char buffer[256];
+  strncpy(buffer, csv, sizeof(buffer) - 1);
+  buffer[sizeof(buffer) - 1] = '\0';
+
+  char *token = strtok(buffer, ",");
+
+  while (token != nullptr && known_code_count < MAX_KNOWN_CODES) {
+    while (*token == ' ' || *token == '\t' || *token == '\n' || *token == '\r') {
+      token++;
+    }
+
+    char *end = token + strlen(token);
+    while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t' || *(end - 1) == '\n' || *(end - 1) == '\r')) {
+      *(end - 1) = '\0';
+      end--;
+    }
+
+    if (token[0] != '\0') {
+      strncpy(known_codes[known_code_count], token, MAX_CODE_LEN - 1);
+      known_codes[known_code_count][MAX_CODE_LEN - 1] = '\0';
+      known_code_count++;
+    }
+
+    token = strtok(nullptr, ",");
+  }
+}
 
 // =====================================================
 // Interrupts
@@ -151,28 +208,42 @@ static void r10rf_bits_to_hex(const char *bits, char *out_hex, size_t out_size, 
 }
 
 static bool r10rf_is_alarm_frame(const char *hex) {
-  // Canonical decoded alarm frame.
-  if (strstr(hex, "aaaa5ba9ce8a") != nullptr) return true;
+  if (hex == nullptr || hex[0] == '\0') return false;
 
-  // Slightly truncated or shifted variants seen in pairing and boundary captures.
-  if (strstr(hex, "aaaa5ba9c") != nullptr) return true;
-  if (strstr(hex, "aaa96ea7") != nullptr) return true;
-  if (strstr(hex, "5554b7538") != nullptr) return true;
-  if (strstr(hex, "5ba9ce8a") != nullptr) return true;
-  if (strstr(hex, "5ba9ce") != nullptr) return true;
+  for (uint8_t i = 0; i < known_code_count; i++) {
+    if (known_codes[i][0] == '\0') continue;
 
-  // Inverted equivalent.
-  if (strstr(hex, "5555a4563175") != nullptr) return true;
+    if (strstr(hex, known_codes[i]) != nullptr) {
+      return true;
+    }
+  }
 
   return false;
 }
 
+static void r10rf_store_raw_frame(const char *hex) {
+  if (hex == nullptr || hex[0] == '\0') return;
+
+  strncpy(last_raw_frame, hex, sizeof(last_raw_frame) - 1);
+  last_raw_frame[sizeof(last_raw_frame) - 1] = '\0';
+}
+
+static void r10rf_store_unknown_frame(const char *hex) {
+  if (hex == nullptr || hex[0] == '\0') return;
+
+  strncpy(last_unknown_frame, hex, sizeof(last_unknown_frame) - 1);
+  last_unknown_frame[sizeof(last_unknown_frame) - 1] = '\0';
+  unknown_frame_seen = true;
+}
+
 static bool r10rf_process_frame_bits(const char *frame_bits) {
-  char normal_hex[48];
-  char inverted_hex[48];
+  char normal_hex[FRAME_TEXT_LEN];
+  char inverted_hex[FRAME_TEXT_LEN];
 
   r10rf_bits_to_hex(frame_bits, normal_hex, sizeof(normal_hex), false);
   r10rf_bits_to_hex(frame_bits, inverted_hex, sizeof(inverted_hex), true);
+
+  r10rf_store_raw_frame(normal_hex);
 
   if (r10rf_is_alarm_frame(normal_hex)) {
     strncpy(last_frame, normal_hex, sizeof(last_frame) - 1);
@@ -186,6 +257,7 @@ static bool r10rf_process_frame_bits(const char *frame_bits) {
     return true;
   }
 
+  r10rf_store_unknown_frame(normal_hex);
   return false;
 }
 
@@ -333,6 +405,10 @@ void r10rf_loop() {
   }
 
   if (!should_process) {
+    if (millis() - last_rx_reset_ms > 30000) {
+      last_rx_reset_ms = millis();
+      ELECHOUSE_cc1101.SetRx();
+    }
     return;
   }
 
@@ -369,12 +445,6 @@ void r10rf_loop() {
   }
 
   ELECHOUSE_cc1101.SetRx();
-
-  // Light periodic RX refresh.
-  if (millis() - last_rx_reset_ms > 30000) {
-    last_rx_reset_ms = millis();
-    ELECHOUSE_cc1101.SetRx();
-  }
 }
 
 bool r10rf_has_alarm() {
@@ -387,6 +457,22 @@ void r10rf_clear_alarm() {
 
 const char *r10rf_get_last_frame() {
   return last_frame;
+}
+
+const char *r10rf_get_last_raw_frame() {
+  return last_raw_frame;
+}
+
+bool r10rf_has_unknown_frame() {
+  return unknown_frame_seen;
+}
+
+const char *r10rf_get_last_unknown_frame() {
+  return last_unknown_frame;
+}
+
+void r10rf_clear_unknown_frame() {
+  unknown_frame_seen = false;
 }
 
 int r10rf_last_rssi() {
