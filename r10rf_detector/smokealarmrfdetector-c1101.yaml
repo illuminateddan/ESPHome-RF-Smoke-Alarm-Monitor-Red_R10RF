@@ -52,8 +52,6 @@ binary_sensor:
     id: r10rf_alarm
     name: "R10RF Smoke Alarm RF"
     device_class: smoke
-    filters:
-      - delayed_off: 10s
 
 sensor:
   - platform: template
@@ -75,6 +73,31 @@ text_sensor:
     id: r10rf_last_unknown_frame
     name: "R10RF Last Unknown Frame"
 
+light:
+  - platform: esp32_rmt_led_strip
+    id: r10rf_status_led
+    name: "R10RF Status LED"
+    pin: GPIO48
+    num_leds: 1
+    chipset: WS2812
+    rgb_order: GRB
+    internal: true
+
+button:
+  - platform: template
+    id: r10rf_acknowledge
+    name: "Acknowledge R10RF Alarm"
+    icon: mdi:check-circle
+    on_press:
+      then:
+        - lambda: |-
+            r10rf_acknowledge_alarm();
+            id(r10rf_alarm).publish_state(false);
+            auto call = id(r10rf_status_led).turn_on();
+            call.set_rgb(0.0, 1.0, 0.0);
+            call.set_brightness(0.08);
+            call.perform();
+
 interval:
   - interval: 50ms
     then:
@@ -89,8 +112,28 @@ interval:
           }
 
           if (r10rf_has_alarm()) {
-            id(r10rf_alarm).publish_state(true);
             id(r10rf_last_frame).publish_state(r10rf_get_last_frame());
             id(r10rf_rssi).publish_state(r10rf_last_rssi());
             r10rf_clear_alarm();
           }
+
+          // The binary sensor is latched in C++ until the acknowledge button is pressed.
+          id(r10rf_alarm).publish_state(r10rf_alarm_is_latched());
+
+  - interval: 500ms
+    then:
+      - lambda: |-
+          static bool led_flash = false;
+          led_flash = !led_flash;
+
+          auto call = id(r10rf_status_led).turn_on();
+
+          if (r10rf_alarm_is_latched()) {
+            call.set_rgb(1.0, 0.0, 0.0);
+            call.set_brightness(led_flash ? 1.0 : 0.0);
+          } else {
+            call.set_rgb(0.0, 1.0, 0.0);
+            call.set_brightness(0.08);
+          }
+
+          call.perform();
