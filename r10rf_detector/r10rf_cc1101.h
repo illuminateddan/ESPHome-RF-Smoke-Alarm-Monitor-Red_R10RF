@@ -70,6 +70,7 @@ static volatile uint32_t capture_start_us = 0;
 static volatile uint32_t last_carrier_change_us = 0;
 
 static bool alarm_detected = false;
+static bool alarm_latched = false;
 static bool unknown_frame_seen = false;
 
 static int last_rssi = -120;
@@ -441,6 +442,7 @@ void r10rf_loop() {
   if (!overflow && count >= MIN_EDGES_TO_PROCESS) {
     if (r10rf_decode_edges(times_copy, levels_copy, count)) {
       alarm_detected = true;
+      alarm_latched = true;
     }
   }
 
@@ -452,7 +454,17 @@ bool r10rf_has_alarm() {
 }
 
 void r10rf_clear_alarm() {
+  // Clears only the short event flag. The latched alarm remains on until acknowledged.
   alarm_detected = false;
+}
+
+bool r10rf_alarm_is_latched() {
+  return alarm_latched;
+}
+
+void r10rf_acknowledge_alarm() {
+  alarm_detected = false;
+  alarm_latched = false;
 }
 
 const char *r10rf_get_last_frame() {
