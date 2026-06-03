@@ -1,0 +1,71 @@
+esphome:
+  name: smokealarmrfdetector-c1101
+  friendly_name: Smoke Alarm RF Detector
+  includes:
+    - r10rf_cc1101.h
+  libraries:
+    - SPI
+    - SmartRC-CC1101-Driver-Lib=https://github.com/LSatan/SmartRC-CC1101-Driver-Lib.git
+  on_boot:
+    priority: 600
+    then:
+      - lambda: |-
+          r10rf_setup();
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: arduino
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: INFO
+
+api:
+
+ota:
+  platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+captive_portal:
+
+binary_sensor:
+  - platform: template
+    id: r10rf_alarm
+    name: "R10RF Smoke Alarm RF"
+    device_class: smoke
+    filters:
+      - delayed_off: 10s
+
+sensor:
+  - platform: template
+    id: r10rf_rssi
+    name: "R10RF CC1101 RSSI"
+    unit_of_measurement: "dBm"
+    accuracy_decimals: 0
+
+text_sensor:
+  - platform: template
+    id: r10rf_last_frame
+    name: "R10RF Last Frame"
+
+interval:
+  - interval: 50ms
+    then:
+      - lambda: |-
+          r10rf_loop();
+
+          if (r10rf_has_alarm()) {
+            id(r10rf_alarm).publish_state(true);
+            id(r10rf_last_frame).publish_state(r10rf_get_last_frame());
+            id(r10rf_rssi).publish_state(r10rf_last_rssi());
+            r10rf_clear_alarm();
+          }
